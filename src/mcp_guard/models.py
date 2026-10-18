@@ -260,6 +260,17 @@ class Decision:
         return self.verdict is Verdict.ALLOW
 
 
+@dataclass(frozen=True)
+class StepOutcome:
+    """What the gateway (or any executor) returns for one proposed call.
+
+    ``result`` is None when the call did not run (blocked, or held for
+    approval)."""
+
+    decision: Decision
+    result: ToolResult | None = None
+
+
 # --------------------------------------------------------------------------
 # Audit log
 

@@ -64,3 +64,11 @@ def test_bad_servers_target(target):
 def test_later_milestone_commands_say_not_implemented(command, capsys):
     assert cli.main([command]) == cli.EXIT_ERROR
     assert "not implemented yet" in capsys.readouterr().err
+
+
+def test_pin_refuses_poisoned_description(tmp_path, capsys):
+    lock = tmp_path / "lock.yaml"
+    code = cli.main(["pin", "--servers", "mock.servers:rug_pulled_servers", "--lock", str(lock)])
+    assert code == cli.EXIT_ERROR
+    assert "R7" in capsys.readouterr().err
+    assert not lock.exists()

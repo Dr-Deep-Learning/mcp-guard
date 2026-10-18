@@ -1,12 +1,18 @@
 # mcp-guard policy. Reviewed like code: change it in a pull request.
 #
-# Status: written in M1 so the mock tools have a home; the gateway starts
-# reading it in M3 (rules), M5 (egress, approval, token scopes).
+# Tool keys are server-qualified: "<server>.<tool>". A tool that is not listed
+# here is blocked, even if it is pinned in registry.lock.yaml.
 #
-# Tool keys are server-qualified: "<server>.<tool>".
-#   sink:         the tool sends, writes or executes something (used by R1, R2)
-#   irreversible: the call cannot be undone; always held for a human (R3)
-#   scopes:       the only token scopes the broker may attach for this tool
+#   sink                  sends, writes or executes something (R1, R2)
+#   irreversible          cannot be undone; always held for a human (R3)
+#   irreversible_when     irreversible only for these argument values (R3)
+#   destination_args      where a sink sends things; after an untrusted read,
+#                         a destination the task did not name is escalated (R2)
+#   trusted_destinations  destinations that never need naming in the task (R2)
+#   egress_args           URLs / email addresses in these args must be allowlisted (R4)
+#   shell_args            hold a shell command; checked for dangerous patterns (R5)
+#   path_args             a path the call writes to; must stay inside the workspace (R5)
+#   scopes                the only token scopes the broker may attach (M5)
 
 version: 1
 
@@ -15,39 +21,49 @@ workspace_root: /workspace
 tools:
   workspace.read_file:
     sink: false
-    irreversible: false
     scopes: [repo:read]
   workspace.write_file:
     sink: true
-    irreversible: false
+    path_args: [path]
     scopes: [repo:write]
   workspace.run_shell:
     sink: true
-    irreversible: false
+    shell_args: [command]
+    egress_args: [command]
     scopes: []
   workspace.git_push:
     sink: true
-    irreversible: false
+    irreversible_when: {force: [true]}     # force-push rewrites shared history
+    destination_args: [remote]
+    trusted_destinations: [origin]
+    egress_args: [remote]
     scopes: [repo:push]
   workspace.deploy:
     sink: true
-    irreversible: true
+    irreversible_when: {environment: [prod]}
     scopes: [deploy:staging, deploy:prod]
   web.fetch_url:
+    # Not a sink: following links on allowlisted hosts is normal. Sending data
+    # out through a URL to any other host is stopped by R4.
     sink: false
-    irreversible: false
+    egress_args: [url]
     scopes: []
   mail.send_email:
     sink: true
-    irreversible: false
+    destination_args: [to]
+    egress_args: [to]
     scopes: [mail:send]
 
 egress:
-  # Hosts a call may reach. Anything else is blocked (R4).
+  # Hosts a call may reach (exact match; "*.example.com" matches subdomains).
   allow_hosts:
     - docs.example.com
     - api.example.com
     - github.example.com
-  # Email recipients are checked by domain.
+  # Email recipients are checked by domain (exact match).
   allow_email_domains:
     - example.com
+
+taint:
+  # R1: a copied run of at least this many characters counts as tainted.
+  min_substring_length: 20

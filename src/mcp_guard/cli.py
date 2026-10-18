@@ -1,6 +1,7 @@
 """Command-line interface: ``mcp-guard pin | verify | redteam | verify-log | demo``.
 
-Implemented so far (M2): ``pin`` and ``verify``. The rest arrive in M4/M5.
+Implemented so far: ``pin`` and ``verify`` (with the R7 description check).
+The rest arrive in M4/M5.
 
 Servers are loaded from ``--servers module:attr``, where ``attr`` is a callable
 (or a list) giving objects with a ``specs()`` method, or ToolSpecs directly.
@@ -25,6 +26,7 @@ from .registry import (
     verify,
     write_lockfile,
 )
+from .rules import r7_check
 
 DEFAULT_SERVERS = "mock.servers:trusted_servers"
 DEFAULT_LOCK = "policy/registry.lock.yaml"
@@ -57,7 +59,7 @@ def load_specs(target: str) -> list[ToolSpec]:
 
 def cmd_pin(args: argparse.Namespace) -> int:
     specs = load_specs(args.servers)
-    lock = write_lockfile(args.lock, specs)
+    lock = write_lockfile(args.lock, specs, description_check=r7_check)
     print(f"pinned {len(lock.tools)} tools -> {args.lock}")
     for qname in sorted(lock.tools):
         print(f"  {qname:28s} {lock.tools[qname].sha256[:16]}...")
@@ -67,7 +69,7 @@ def cmd_pin(args: argparse.Namespace) -> int:
 def cmd_verify(args: argparse.Namespace) -> int:
     lock = load_lockfile(args.lock)
     specs = load_specs(args.servers)
-    registry = verify(specs, lock)
+    registry = verify(specs, lock, description_check=r7_check)
     for qname in sorted(registry.enabled):
         print(f"  OK        {qname}")
     for event in registry.events:

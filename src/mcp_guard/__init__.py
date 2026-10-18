@@ -6,6 +6,7 @@ Research prototype. The agent, tools and backends in this repository are mocks.
 from .models import (
     AuditRecord,
     Decision,
+    StepOutcome,
     ToolCall,
     ToolResult,
     ToolSpec,
@@ -17,6 +18,7 @@ __version__ = "0.1.0"
 __all__ = [
     "AuditRecord",
     "Decision",
+    "StepOutcome",
     "ToolCall",
     "ToolResult",
     "ToolSpec",

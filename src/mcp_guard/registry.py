@@ -16,8 +16,10 @@ Canonical form (section 5 of the plan): JSON of
 UTF-8. Pin = SHA-256 hex of those bytes. No Unicode normalisation is applied
 on purpose: an invisible character added to a description is a change.
 
-Tool-description scanning for injected instructions (R7) is a separate check,
-added in M3.
+Tool-description scanning (R7) plugs in through ``description_check``: a
+callable that returns a refusal reason or None. ``pin`` refuses to pin a
+flagged tool; ``verify`` disables it (``POISONED``). The registry does not
+import the rules, so it stays usable on its own.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import yaml
 
@@ -55,6 +57,14 @@ class LockfileError(RegistryError):
 
 class ShadowingError(RegistryError):
     """Two tools share a name (across servers, or twice on one server)."""
+
+
+class PoisonedToolError(RegistryError):
+    """A tool description failed the description check (R7)."""
+
+
+#: description_check(spec) -> refusal reason, or None if acceptable.
+DescriptionCheck = Callable[[ToolSpec], "str | None"]
 
 
 # --------------------------------------------------------------------------
@@ -131,16 +141,23 @@ def check_unique_names(specs: Iterable[ToolSpec]) -> None:
         raise ShadowingError("duplicate tool names: " + "; ".join(problems))
 
 
-def build_lockfile(specs: Iterable[ToolSpec]) -> Lockfile:
-    """Pin every spec. Refuses duplicate tool names (shadowing)."""
+def build_lockfile(specs: Iterable[ToolSpec],
+                   description_check: DescriptionCheck | None = None) -> Lockfile:
+    """Pin every spec. Refuses duplicate tool names (shadowing) and, if a
+    ``description_check`` is given, any tool it flags."""
     specs = list(specs)
     check_unique_names(specs)
+    if description_check is not None:
+        flagged = [(s.qualified_name, r) for s in specs if (r := description_check(s))]
+        if flagged:
+            raise PoisonedToolError("refusing to pin: " + "; ".join(f"{q}: {r}" for q, r in flagged))
     tools = {s.qualified_name: PinnedTool(s.server, s.name, pin(s)) for s in specs}
     return Lockfile(tools)
 
 
-def write_lockfile(path: str | Path, specs: Iterable[ToolSpec]) -> Lockfile:
-    lock = build_lockfile(specs)
+def write_lockfile(path: str | Path, specs: Iterable[ToolSpec],
+                   description_check: DescriptionCheck | None = None) -> Lockfile:
+    lock = build_lockfile(specs, description_check)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # newline="\n": identical bytes on Windows and Linux, so diffs stay clean.
@@ -205,6 +222,7 @@ class EventKind(str, Enum):
     UNPINNED = "UNPINNED"    # advertised but not in the lockfile -> disabled
     SHADOWING = "SHADOWING"  # same name from another server -> disabled
     DUPLICATE = "DUPLICATE"  # same server advertises a name twice -> disabled
+    POISONED = "POISONED"    # description failed the R7 check -> disabled
     MISSING = "MISSING"      # pinned but not advertised -> informational
 
     def __str__(self) -> str:
@@ -213,7 +231,8 @@ class EventKind(str, Enum):
 
 #: Events that mean something was refused. MISSING is informational.
 BLOCKING_EVENTS = frozenset(
-    {EventKind.RUG_PULL, EventKind.UNPINNED, EventKind.SHADOWING, EventKind.DUPLICATE}
+    {EventKind.RUG_PULL, EventKind.UNPINNED, EventKind.SHADOWING, EventKind.DUPLICATE,
+     EventKind.POISONED}
 )
 
 
@@ -256,12 +275,15 @@ class Registry:
         return [e for e in self.events if e.kind is kind]
 
 
-def verify(advertised: Iterable[ToolSpec], lock: Lockfile) -> Registry:
+def verify(advertised: Iterable[ToolSpec], lock: Lockfile,
+           description_check: DescriptionCheck | None = None) -> Registry:
     """Check every advertised tool against the lockfile.
 
-    A tool is enabled only if it is pinned, its hash matches, and no other
-    server advertises the same name (unless that other server is the one
-    that pinned it, in which case only the impostor is disabled).
+    A tool is enabled only if it is pinned, its hash matches, no other server
+    advertises the same name (unless that other server is the one that pinned
+    it, in which case only the impostor is disabled), and its description
+    passes ``description_check`` if one is given. The description check runs
+    last, so it catches a poisoned tool that was pinned by mistake.
     """
     advertised = list(advertised)
     registry = Registry()
@@ -307,6 +329,12 @@ def verify(advertised: Iterable[ToolSpec], lock: Lockfile) -> Registry:
                 expected=pinned.sha256, actual=actual,
             ))
             continue
+
+        if description_check is not None:
+            reason = description_check(spec)
+            if reason:
+                registry.events.append(RegistryEvent(EventKind.POISONED, spec.server, spec.name, reason))
+                continue
 
         registry.enabled[qname] = spec
 

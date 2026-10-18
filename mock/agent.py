@@ -28,7 +28,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 import yaml
 
-from mcp_guard.models import Decision, ToolCall, ToolResult, Verdict
+from mcp_guard.models import Decision, StepOutcome, ToolCall, ToolResult, Verdict
 
 THREATS = {f"T{i}" for i in range(1, 10)}
 KINDS = {"attack", "benign"}
@@ -156,14 +156,6 @@ def load_cases(directory: str | Path) -> list[Case]:
 
 # --------------------------------------------------------------------------
 # Replay
-
-
-@dataclass(frozen=True)
-class StepOutcome:
-    """What the executor returns for one proposed call."""
-
-    decision: Decision
-    result: ToolResult | None = None  # None when the call did not run
 
 
 # executor(call, scripted_output) -> StepOutcome

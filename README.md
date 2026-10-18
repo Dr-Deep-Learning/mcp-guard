@@ -6,17 +6,35 @@ A small, open-source security gateway that sits between a coding agent and its M
 
 > **Status: research prototype, work in progress.** The agent is a scripted mock, the tools are synthetic, and the backends are in-memory. Nothing here has been used in production. Results and numbers will be added only once they come from running the red-team suite.
 
-## What works today (milestones M1–M2)
+## What works today (milestones M1–M3)
 
 | Piece | What it does |
 |---|---|
-| `src/mcp_guard/models.py` | `ToolSpec`, `ToolCall`, `ToolResult`, `Decision` (ALLOW / BLOCK / ESCALATE), `AuditRecord` |
+| `src/mcp_guard/models.py` | `ToolSpec`, `ToolCall`, `ToolResult`, `Decision` (ALLOW / BLOCK / ESCALATE), `StepOutcome`, `AuditRecord` |
 | `mock/tools.py`, `mock/servers.py` | Synthetic tools (`read_file`, `write_file`, `fetch_url`, `send_email`, `run_shell`, `git_push`, `deploy`) on an in-memory backend; mock MCP servers plus rug-pull and shadowing variants |
 | `mock/agent.py` | Deterministic mock agent that replays a scripted YAML case through any executor |
-| `src/mcp_guard/registry.py` | Hash-pinned tool registry: canonical hashing, lockfile, runtime verify, rug-pull and shadowing detection |
+| `src/mcp_guard/registry.py` | Hash-pinned tool registry: canonical hashing, lockfile, runtime verify, rug-pull, shadowing and poisoned-description (R7) detection |
+| `src/mcp_guard/policy.py` | Loads `policy/policy.yaml`: sinks, irreversible tools, destinations, egress allowlist, workspace root |
+| `src/mcp_guard/taint.py` | Tracks URLs, emails, paths and 20-character runs of untrusted tool output, minus anything the task names |
+| `src/mcp_guard/rules.py`, `auditor.py` | Rules R1–R7 and the cascade that combines them into one decision |
+| `src/mcp_guard/gateway.py` | Registry check → taint → auditor → tool. Only ALLOW runs; ESCALATE is held (approval gate in M5) |
 | `mcp-guard pin` / `verify` | Write `policy/registry.lock.yaml`; check advertised tools against it |
 
-Coming next: taint tracking and rules R1–R7 (M3), the red-team corpus and report (M4), token broker, egress, approval and the hash-chained audit log (M5), CI gate and full README (M6).
+Coming next: the red-team corpus and report (M4); token broker, egress as its own gateway step, approval and the hash-chained audit log (M5); CI gate and full README (M6).
+
+### Rules
+
+| ID | Fires when | Decision |
+|---|---|---|
+| R1 | A sink (sends, writes, executes) gets an argument copied from untrusted content: a URL, email, path, or a run of 20+ characters the task did not contain | BLOCK |
+| R2 | After an untrusted read, a sink sends to a destination the task did not name | ESCALATE |
+| R3 | The tool, or these argument values (`deploy` to prod, force-push), are irreversible | ESCALATE |
+| R4 | A URL host or email domain in a declared egress argument is not allowlisted | BLOCK |
+| R5 | Dangerous shell (`rm -r` outside the workspace, pipe-to-shell, credential files, `chmod 777`, history wiping) or a write outside the workspace | BLOCK |
+| R6 | A credential-shaped argument (bearer token, AWS key id, private key, `Authorization`, GitHub/Slack tokens) | BLOCK |
+| R7 | A tool description contains instruction-like text aimed at the model, or hidden characters | Refused at pin and verify |
+
+The scripted prompt-injection case `T1-003` (a fetched page tells the agent to email `~/.env` to an outside address) is blocked at the email step with R1 first; R4 and R2 also fire. Without the gateway, the same replay sends the email. Both are covered by tests.
 
 ## Quickstart
 
@@ -38,7 +56,7 @@ Run the CLI from the repository root (it loads the mock servers from `mock/`).
 - Canonical form of a tool: JSON of `{server, name, description, inputSchema}` with sorted keys, no whitespace, UTF-8. No Unicode normalisation, so an invisible character added to a description counts as a change.
 - Pin: SHA-256 of the canonical form.
 - `mcp-guard pin` writes `policy/registry.lock.yaml`. Changes to it are reviewed in a pull request, like a dependency lockfile.
-- At runtime every advertised tool is re-hashed. A mismatch disables the tool (`RUG_PULL`). A tool that is not pinned is refused (`UNPINNED`). A tool name advertised by more than one server is refused for every server except the one that pinned it (`SHADOWING`); `pin` refuses to write a lockfile with duplicate names.
+- At runtime every advertised tool is re-hashed. A mismatch disables the tool (`RUG_PULL`). A tool that is not pinned is refused (`UNPINNED`). A tool name advertised by more than one server is refused for every server except the one that pinned it (`SHADOWING`); `pin` refuses to write a lockfile with duplicate names. A description that fails R7 is refused by `pin` and disabled at runtime (`POISONED`).
 
 ## Repository layout
 
@@ -50,6 +68,12 @@ redteam/       attack and benign cases; scorer (M4)
 tests/         pytest suite
 results/       generated reports (M4)
 ```
+
+## Known limits (so far)
+
+- R1 matches copied text, so paraphrase, encoding (base64, hex) or splitting a value into short pieces evades it. R2, R4 and the approval gate are the backstops.
+- R1 also blocks a benign message that quotes 20+ characters of untrusted content verbatim. A test documents this; the red-team corpus will measure how often it happens before any tuning.
+- Shell rules are pattern-based and can be evaded by a determined attacker; they catch the common, well-documented forms.
 
 ## Clean-room note
 
