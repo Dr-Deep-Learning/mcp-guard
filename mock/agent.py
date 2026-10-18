@@ -190,6 +190,7 @@ class StepRecord:
     call: ToolCall
     decision: Decision
     result: ToolResult | None
+    approved: bool | None = None
 
 
 @dataclass
@@ -232,11 +233,12 @@ class MockAgent:
             outcome = executor(call, scripted)
             if not isinstance(outcome, StepOutcome):
                 raise TypeError("executor must return a StepOutcome")
-            if outcome.decision.allowed and outcome.result is None:
-                raise ValueError(f"step {i}: executor allowed the call but returned no result")
-            if not outcome.decision.allowed and outcome.result is not None:
-                raise ValueError(f"step {i}: executor ran a call it did not allow")
-            transcript.steps.append(StepRecord(i, call, outcome.decision, outcome.result))
+            try:
+                outcome.check_consistent()
+            except ValueError as exc:
+                raise ValueError(f"step {i}: {exc}") from None
+            transcript.steps.append(StepRecord(i, call, outcome.decision, outcome.result,
+                                               outcome.approved))
         return transcript
 
 

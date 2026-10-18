@@ -6,7 +6,7 @@ A small, open-source security gateway that sits between a coding agent and its M
 
 > **Status: research prototype, work in progress.** The agent is a scripted mock, the tools are synthetic, and the backends are in-memory. Nothing here has been used in production. Results and numbers will be added only once they come from running the red-team suite.
 
-## What works today (milestones M1–M4)
+## What works today (milestones M1–M5)
 
 | Piece | What it does |
 |---|---|
@@ -17,11 +17,15 @@ A small, open-source security gateway that sits between a coding agent and its M
 | `src/mcp_guard/policy.py` | Loads `policy/policy.yaml`: sinks, irreversible tools, destinations, egress allowlist, workspace root |
 | `src/mcp_guard/taint.py` | Tracks URLs, emails, paths and 20-character runs of untrusted tool output, minus anything the task names |
 | `src/mcp_guard/rules.py`, `auditor.py` | Rules R1–R7 and the cascade that combines them into one decision |
-| `src/mcp_guard/gateway.py` | Registry check → taint → auditor → tool. Only ALLOW runs; ESCALATE is held (approval gate in M5) |
+| `src/mcp_guard/gateway.py` | The pipeline: registry → taint → auditor → egress → approval → token broker → audit log → tool |
+| `src/mcp_guard/approval.py` | Approvers for escalated calls: auto-deny (default), terminal prompt, auto-approve (tests only) |
+| `src/mcp_guard/tokens.py` | Mock token broker (one token per tool, scoped by policy, attached out of band) and credential stripping |
+| `src/mcp_guard/audit_log.py` | Hash-chained, append-only JSONL log; `mcp-guard verify-log` reports the first broken link |
 | `mcp-guard pin` / `verify` | Write `policy/registry.lock.yaml`; check advertised tools against it |
-| `redteam/cases/`, `mcp-guard redteam` | 25 attack cases (T1–T8) and 25 benign look-alikes, replayed through the gateway; writes `results/redteam_report.{json,md}` |
+| `redteam/cases/`, `mcp-guard redteam` | 25 attack cases (T1–T8) and 25 benign look-alikes replayed through the full gateway, plus 5 generated audit-log tampering checks (T9); writes `results/redteam_report.{json,md}` |
+| `mcp-guard demo --case ID` | Replays one case and narrates each decision |
 
-Coming next: token broker, egress as its own gateway step, approval and the hash-chained audit log (M5); CI gate and full README (M6).
+Coming next: the CI gate on the red-team numbers and the full README (M6).
 
 ### Rules
 
@@ -49,6 +53,12 @@ mcp-guard verify                                            # all tools match th
 mcp-guard verify --servers mock.servers:rug_pulled_servers  # RUG_PULL: web.fetch_url disabled
 mcp-guard verify --servers mock.servers:shadowing_servers   # SHADOWING: helper.send_email refused
 mcp-guard redteam                                           # replay the corpus, write results/
+
+mcp-guard demo --case T1-003                                # injected page -> email blocked by R1
+mcp-guard demo --case T1-003 --servers rug_pulled           # same, with fetch_url rug-pulled
+mcp-guard demo --case T6-001                                # curl | sh -> blocked by R5
+mcp-guard demo --case T7-001 --approve ask --log audit.jsonl  # prod deploy waits for you
+mcp-guard verify-log audit.jsonl                            # check the hash chain
 ```
 
 ## Results
@@ -80,6 +90,8 @@ results/       generated reports (M4)
 - R1 matches copied text, so paraphrase, encoding (base64, hex) or splitting a value into short pieces evades it. R2, R4 and the approval gate are the backstops.
 - R1 also blocks a benign message that quotes 20+ characters of untrusted content verbatim. A test documents this; the red-team corpus will measure how often it happens before any tuning.
 - Shell rules are pattern-based and can be evaded by a determined attacker; they catch the common, well-documented forms.
+- The audit log's hash chain shows edits, deletions, insertions and reordering, but not removal of the newest records (or a rewritten tail with recomputed hashes). Store the head hash somewhere the writer cannot change and pass it to `verify-log --head`.
+- Tokens are random mock strings, and the backends that check their scopes are mocks.
 
 ## Clean-room note
 

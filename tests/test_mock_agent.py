@@ -151,7 +151,7 @@ def test_replay_rejects_inconsistent_executors(case):
     with pytest.raises(ValueError, match="no result"):
         MockAgent(case).replay(lambda c, s: StepOutcome(Decision.allow()))
     host = MockToolHost(trusted_servers())
-    with pytest.raises(ValueError, match="did not allow"):
+    with pytest.raises(ValueError, match="blocked but ran"):
         MockAgent(case).replay(
             lambda c, s: StepOutcome(Decision.block(["R0"], "x"), host.invoke(c, s)))
     with pytest.raises(TypeError):

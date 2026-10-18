@@ -11,3 +11,5 @@ venv/
 htmlcov/
 .idea/
 .vscode/
+# audit logs written by `mcp-guard demo --log ...`
+*.jsonl

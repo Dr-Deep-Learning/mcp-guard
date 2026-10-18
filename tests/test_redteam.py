@@ -45,7 +45,7 @@ FALSE_POS = mk("B-902", "benign", "deploy v1 to prod",
 
 @pytest.fixture(scope="module")
 def mini_report():
-    return score([MISSED, ALLOWED, CAUGHT, FALSE_POS], POLICY, LOCK)
+    return score([MISSED, ALLOWED, CAUGHT, FALSE_POS], POLICY, LOCK, include_log_checks=False)
 
 
 # ---------------------------------------------------------------- corpus
@@ -171,7 +171,7 @@ def test_reports_written(tmp_path, mini_report):
 
 
 def test_markdown_escapes_pipes():
-    report = score([MISSED], POLICY, LOCK)
+    report = score([MISSED], POLICY, LOCK, include_log_checks=False)
     report["misses"][0]["notes"] = "a | b"
     assert "a \\| b" in render_markdown(report)
 
@@ -214,3 +214,25 @@ def test_cli_redteam_rejects_bad_thresholds(flag, in_repo_root):
 def test_cli_redteam_empty_case_dir(tmp_path, capsys, in_repo_root):
     assert cli.main(["redteam", "--cases", str(tmp_path), "--no-write"]) == cli.EXIT_ERROR
     assert "no cases" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- T9 log checks
+
+from redteam.run import log_checks  # noqa: E402
+
+
+def test_log_checks_detect_tampering_except_unanchored_truncation():
+    results = {r.id: r for r in log_checks()}
+    assert set(results) == {"T9-001", "T9-002", "T9-003", "T9-004", "T9-005"}
+    assert all(r.threat == "T9" and not r.replayed for r in results.values())
+    assert [i for i, r in sorted(results.items()) if r.caught] == ["T9-001", "T9-002", "T9-003", "T9-004"]
+    assert "Hard case" in results["T9-005"].notes
+
+
+def test_log_checks_are_in_the_report_but_not_in_call_stats():
+    with_checks = score([CAUGHT], POLICY, LOCK)
+    without = score([CAUGHT], POLICY, LOCK, include_log_checks=False)
+    assert with_checks["summary"]["attacks"] == without["summary"]["attacks"] + 5
+    assert with_checks["summary"]["calls"] == without["summary"]["calls"] == 1
+    assert with_checks["per_threat"]["T9"]["attacks"] == 5
+    assert with_checks["summary"]["log_checks"] == 5

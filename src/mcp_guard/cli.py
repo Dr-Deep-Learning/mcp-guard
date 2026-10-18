@@ -1,7 +1,8 @@
 """Command-line interface: ``mcp-guard pin | verify | redteam | verify-log | demo``.
 
-Implemented so far: ``pin`` and ``verify`` (with the R7 description check) and
-``redteam``. ``verify-log`` and ``demo`` arrive in M5.
+Commands: ``pin`` and ``verify`` (registry, with the R7 description check),
+``redteam`` (score the corpus), ``verify-log`` (audit-log chain) and ``demo``
+(replay one case through the gateway and narrate it).
 
 Servers are loaded from ``--servers module:attr``, where ``attr`` is a callable
 (or a list) giving objects with a ``specs()`` method, or ToolSpecs directly.
@@ -26,6 +27,7 @@ from .registry import (
     verify,
     write_lockfile,
 )
+from .audit_log import AuditLogError
 from .rules import r7_check
 
 DEFAULT_SERVERS = "mock.servers:trusted_servers"
@@ -36,7 +38,7 @@ DEFAULT_RESULTS = "results"
 
 EXIT_OK = 0
 EXIT_REFUSED = 1       # verification found a rug pull, shadowing, etc.
-EXIT_ERROR = 2         # bad input, missing file, not implemented
+EXIT_ERROR = 2         # bad input or missing file
 
 
 def _cwd_on_path() -> None:
@@ -125,12 +127,71 @@ def cmd_redteam(args: argparse.Namespace) -> int:
     return EXIT_REFUSED if failures else EXIT_OK
 
 
-def _not_yet(milestone: str):
-    def run(args: argparse.Namespace) -> int:
-        print(f"`{args.command}` is not implemented yet (planned for {milestone}).",
-              file=sys.stderr)
-        return EXIT_ERROR
-    return run
+def cmd_verify_log(args: argparse.Namespace) -> int:
+    from .audit_log import verify_log
+
+    result = verify_log(args.path, expected_head=args.head)
+    print(result)
+    return EXIT_OK if result.ok else EXIT_REFUSED
+
+
+def _short(text: str, width: int = 100) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[: width - 3] + "..."
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    _cwd_on_path()
+    from mock.agent import MockAgent, load_cases
+    from redteam.run import build_gateway
+
+    from .approval import AutoDeny, CLIApprover
+    from .audit_log import AuditLog
+    from .policy import load_policy
+
+    by_id = {c.id: c for c in load_cases(args.cases)}
+    case = by_id.get(args.case)
+    if case is None:
+        raise ValueError(f"no case {args.case!r} in {args.cases}; try one of: "
+                         f"{', '.join(sorted(by_id)[:8])} ...")
+    approver = CLIApprover() if args.approve == "ask" else AutoDeny()
+    log = AuditLog(args.log) if args.log else AuditLog()
+    gateway = build_gateway(case, load_policy(args.policy), load_lockfile(args.lock),
+                            servers=args.servers, approver=approver, log=log)
+
+    print(f"Case {case.id} ({case.kind}{', ' + case.threat if case.threat else ''})")
+    print(f"Task: {case.task}")
+    refused = [e for e in gateway.registry.events if e.kind in BLOCKING_EVENTS]
+    print(f"Registry: {len(gateway.registry.enabled)} tools enabled, {len(refused)} refused")
+    for e in refused:
+        print(f"  {e.kind.value} {e.qualified_name}: {e.detail}")
+    print()
+
+    step = 0
+
+    def narrate(call, scripted):
+        nonlocal step
+        step += 1
+        print(f"step {step}  {call.qualified_name}")
+        outcome = gateway(call, scripted)
+        d = outcome.decision
+        rules = f"  [{', '.join(d.rules)}]" if d.rules else ""
+        print(f"         {d.verdict.value}{rules}")
+        if d.verdict.value != "ALLOW":
+            for part in d.reason.split("; "):
+                print(f"         {_short(part)}")
+        if outcome.approved is not None:
+            print(f"         approval: {'approved' if outcome.approved else 'denied'} by {outcome.approver}")
+        if outcome.result is not None:
+            print(f"         output: {_short(outcome.result.output, 80)}")
+        return outcome
+
+    MockAgent(case).replay(narrate)
+    print()
+    where = f" -> {args.log}" if args.log else " (in memory)"
+    noun = "record" if log.seq == 1 else "records"
+    print(f"Audit log: {log.seq} {noun}, head {log.head}{where}")
+    return EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -166,10 +227,23 @@ def build_parser() -> argparse.ArgumentParser:
                     help="fail (exit 1) if the false-positive rate is above this fraction")
     sp.add_argument("--no-write", action="store_true", help="print the summary only")
     sp.set_defaults(func=cmd_redteam)
-    sp = sub.add_parser("verify-log", help="check the audit log's hash chain (M5)")
-    sp.set_defaults(func=_not_yet("M5"))
-    sp = sub.add_parser("demo", help="replay one case through the gateway (M5)")
-    sp.set_defaults(func=_not_yet("M5"))
+    sp = sub.add_parser("verify-log", help="check an audit log's hash chain")
+    sp.add_argument("path", help="audit log (JSONL)")
+    sp.add_argument("--head", default=None,
+                    help="expected head hash, stored elsewhere; catches removal of the newest records")
+    sp.set_defaults(func=cmd_verify_log)
+
+    sp = sub.add_parser("demo", help="replay one red-team case through the gateway and narrate it")
+    sp.add_argument("--case", required=True, help="case id, e.g. T1-003")
+    sp.add_argument("--servers", default=None,
+                    help="override the case's mock server set, e.g. rug_pulled")
+    sp.add_argument("--approve", choices=["deny", "ask"], default="deny",
+                    help="approver for escalated calls (default: deny)")
+    sp.add_argument("--log", default=None, help="append the audit log to this JSONL file")
+    sp.add_argument("--cases", default=DEFAULT_CASES)
+    sp.add_argument("--policy", default=DEFAULT_POLICY)
+    sp.add_argument("--lock", default=DEFAULT_LOCK)
+    sp.set_defaults(func=cmd_demo)
     return p
 
 
@@ -177,7 +251,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except (RegistryError, ValueError, ImportError, AttributeError) as exc:
+    except (RegistryError, AuditLogError, ValueError, ImportError, AttributeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
 

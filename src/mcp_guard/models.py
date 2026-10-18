@@ -264,11 +264,30 @@ class Decision:
 class StepOutcome:
     """What the gateway (or any executor) returns for one proposed call.
 
-    ``result`` is None when the call did not run (blocked, or held for
-    approval)."""
+    ``decision`` is the gateway's verdict before any human looked at it, so an
+    escalated call keeps ``ESCALATE`` whatever the approver said.
+    ``approved``/``approver`` are set only for escalated calls.
+    ``result`` is None when the call did not run (blocked, or escalated and
+    not approved)."""
 
     decision: Decision
     result: ToolResult | None = None
+    approver: str | None = None
+    approved: bool | None = None
+
+    @property
+    def ran(self) -> bool:
+        return self.result is not None
+
+    def check_consistent(self) -> None:
+        """Raise ValueError if ``result`` contradicts the decision."""
+        v = self.decision.verdict
+        if v is Verdict.ALLOW and not self.ran:
+            raise ValueError("call was allowed but returned no result")
+        if v is Verdict.BLOCK and self.ran:
+            raise ValueError("call was blocked but ran anyway")
+        if v is Verdict.ESCALATE and self.ran != bool(self.approved):
+            raise ValueError("escalated call ran without approval, or was approved but did not run")
 
 
 # --------------------------------------------------------------------------
@@ -278,7 +297,7 @@ class StepOutcome:
 # Field order matches the record shown in the project plan (section 5).
 AUDIT_FIELDS = (
     "ts", "seq", "session", "server", "tool", "decision", "rules", "reason",
-    "tainted_args", "approver", "prev_hash", "hash",
+    "tainted_args", "approver", "approved", "prev_hash", "hash",
 )
 
 
@@ -287,7 +306,7 @@ class AuditRecord:
     """One decision in the audit log.
 
     ``hash`` is SHA-256 over the record without ``hash`` (including
-    ``prev_hash``); computing and checking it is ``audit_log``'s job (M5).
+    ``prev_hash``); computing and checking it is ``audit_log``'s job.
     """
 
     ts: str
@@ -300,6 +319,7 @@ class AuditRecord:
     reason: str = ""
     tainted_args: tuple[str, ...] = ()
     approver: str | None = None
+    approved: bool | None = None
     prev_hash: str = ""
     hash: str | None = None
 
@@ -322,6 +342,7 @@ class AuditRecord:
             "reason": self.reason,
             "tainted_args": list(self.tainted_args),
             "approver": self.approver,
+            "approved": self.approved,
             "prev_hash": self.prev_hash,
         }
         if include_hash:
@@ -341,7 +362,7 @@ class AuditRecord:
     @classmethod
     def for_decision(cls, call: ToolCall, decision: Decision, *, seq: int,
                      prev_hash: str, approver: str | None = None,
-                     ts: str | None = None) -> "AuditRecord":
+                     approved: bool | None = None, ts: str | None = None) -> "AuditRecord":
         return cls(
             ts=ts or utc_now_iso(),
             seq=seq,
@@ -353,5 +374,6 @@ class AuditRecord:
             reason=decision.reason,
             tainted_args=decision.tainted_args,
             approver=approver,
+            approved=approved,
             prev_hash=prev_hash,
         )

@@ -26,7 +26,7 @@ from typing import Any, Iterable, Mapping
 
 from mcp_guard.models import ToolCall, ToolResult, ToolSpec, validate_server_name
 
-from .tools import TOOLS, MockBackend, MockTool, ToolError
+from .tools import TOOLS, MockBackend, MockTool, ToolError, required_scope
 
 
 @dataclass
@@ -116,7 +116,11 @@ class MockToolHost:
     replaces its return value.
     """
 
-    def __init__(self, servers: Iterable[MockServer], backend: MockBackend | None = None):
+    def __init__(self, servers: Iterable[MockServer], backend: MockBackend | None = None,
+                 require_auth: bool = False):
+        # require_auth: backends check the attached token's scopes, as real
+        # ones would. Off by default so the unguarded baseline can run.
+        self.require_auth = require_auth
         self.servers: dict[str, MockServer] = {}
         for s in servers:
             if s.name in self.servers:
@@ -133,10 +137,18 @@ class MockToolHost:
             return True
         return False
 
-    def invoke(self, call: ToolCall, scripted_output: str | None = None) -> ToolResult:
+    def invoke(self, call: ToolCall, scripted_output: str | None = None,
+               credential: Any = None) -> ToolResult:
         server = self.servers.get(call.server)
         if server is None:
             return ToolResult(call, f"error: unknown server {call.server!r}", error=True)
+        if credential is not None:
+            self.backend.auth_log.append({"tool": call.qualified_name, "token_id": credential.token_id,
+                                          "token_tool": credential.tool})
+        if self.require_auth:
+            scope = required_scope(call.tool, call.args)
+            if scope is not None and (credential is None or not credential.allows(scope)):
+                return ToolResult(call, f"error: 401 unauthorized (needs scope {scope})", error=True)
         try:
             seeded = scripted_output is not None and self._seed(call, scripted_output)
             output = server.call_tool(call.tool, call.args, self.backend)

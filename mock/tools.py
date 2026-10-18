@@ -30,6 +30,7 @@ class MockBackend:
     shell_log: list[str] = field(default_factory=list)
     pushes: list[dict[str, str]] = field(default_factory=list)
     deploys: list[dict[str, str]] = field(default_factory=list)
+    auth_log: list[dict[str, str]] = field(default_factory=list)  # token ids used, never secrets
 
     def resolve(self, path: str) -> str:
         """Normalise a path; relative paths are taken from the workspace root.
@@ -209,3 +210,15 @@ TOOLS: dict[str, MockTool] = {
         ),
     )
 }
+
+
+def required_scope(tool: str, args: Mapping[str, Any]) -> str | None:
+    """Scope a mock backend demands for a call (None = no credential needed)."""
+    if tool == "deploy":
+        return f"deploy:{args.get('environment')}"
+    return {
+        "read_file": "repo:read",
+        "write_file": "repo:write",
+        "git_push": "repo:push",
+        "send_email": "mail:send",
+    }.get(tool)

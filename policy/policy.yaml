@@ -12,7 +12,7 @@
 #   egress_args           URLs / email addresses in these args must be allowlisted (R4)
 #   shell_args            hold a shell command; checked for dangerous patterns (R5)
 #   path_args             a path the call writes to; must stay inside the workspace (R5)
-#   scopes                the only token scopes the broker may attach (M5)
+#   scopes                the only token scopes the broker may attach
 
 version: 1
 

@@ -11,9 +11,8 @@ An egress arg that holds a value which looks like a URL but has no host is
 treated as a violation. A value with no URL or email (``remote: origin``)
 has no destination to check.
 
-Status: the R4 check is used by the auditor from M3. In M5 the gateway also
-runs it as its own pipeline step (step 4) so it applies even if rules are
-reconfigured.
+The auditor runs this as rule R4, and the gateway runs it again as its own
+pipeline step (step 4), so egress holds even if the rule set is changed.
 """
 
 from __future__ import annotations

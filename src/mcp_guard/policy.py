@@ -15,7 +15,7 @@ a tool missing from the policy is blocked):
     egress_args           [arg]  args whose URLs / email addresses must be allowlisted (R4)
     shell_args            [arg]  args holding a shell command (R5)
     path_args             [arg]  args holding a path the call writes to (R5 sandbox check)
-    scopes                [str]  token scopes the broker may attach (M5)
+    scopes                [str]  token scopes the broker may attach
 """
 
 from __future__ import annotations

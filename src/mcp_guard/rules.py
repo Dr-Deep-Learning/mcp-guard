@@ -124,7 +124,7 @@ def r3_irreversible(ctx: RuleContext) -> list[Finding]:
              if ctx.call.args.get(a) in vals]
     detail = f" ({', '.join(which)})" if which else ""
     return [Finding("R3", Verdict.ESCALATE,
-                    f"{ctx.call.qualified_name} is irreversible{detail}; needs approval")]
+                    f"{ctx.call.qualified_name} is irreversible{detail} and needs approval")]
 
 
 # --------------------------------------------------------------------------
