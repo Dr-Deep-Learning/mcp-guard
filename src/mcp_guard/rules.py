@@ -6,9 +6,9 @@ pinned or verified, not on calls.
 
 | ID | Rule                                                              | Default  |
 |----|-------------------------------------------------------------------|----------|
-| R1 | sink call with an argument copied from untrusted content          | BLOCK    |
+| R1 | sink call with an argument copied from untrusted content, or untrusted data in a URL query | BLOCK |
 | R2 | untrusted read earlier, then a sink to a destination the task did not name | ESCALATE |
-| R3 | irreversible tool (or irreversible argument values)               | ESCALATE |
+| R3 | irreversible tool, argument values, or irreversible git push in a shell command | ESCALATE |
 | R4 | destination host / email domain not in the egress allowlist       | BLOCK    |
 | R5 | dangerous shell command, or a write outside the workspace         | BLOCK    |
 | R6 | credential-shaped argument                                        | BLOCK    |
@@ -25,11 +25,12 @@ import re
 import shlex
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import unquote_plus, urlsplit
 
 from . import egress
 from .models import ToolCall, ToolSpec, Verdict
 from .policy import Policy, ToolPolicy
-from .taint import TaintTracker, iter_strings, top_level
+from .taint import URL_RE, TaintMatch, TaintTracker, iter_strings, top_level
 
 
 @dataclass(frozen=True)
@@ -59,21 +60,82 @@ def _quote_args(args: Iterable[str]) -> str:
 # R1: tainted argument to a sink
 
 
+def _workspace_path(path: str, root: str) -> str:
+    if path.startswith("~") or posixpath.isabs(path):
+        return posixpath.normpath(path)
+    return posixpath.normpath(posixpath.join(root, path))
+
+
+def _sink_matches(ctx: RuleContext) -> list[TaintMatch]:
+    """Taint matches for a sink call, with one exemption for edits.
+
+    Writing a file's own text back to it moves nothing anywhere new, so text
+    whose only untrusted source is the file being written does not count.
+    The check re-scans with that file's text excluded, so text that also
+    came from any other untrusted source still counts. The path argument
+    itself is always checked against every source.
+    """
+    root = ctx.policy.workspace_root
+    args, task = ctx.call.args, ctx.call.task
+    targets = {_workspace_path(v, root) for a in ctx.tool.path_args
+               if isinstance(v := args.get(a), str)}
+    if not targets:
+        return ctx.taint.matches(args, trusted=task)
+    path_part = {k: v for k, v in args.items() if k in ctx.tool.path_args}
+    rest = {k: v for k, v in args.items() if k not in ctx.tool.path_args}
+
+    def same_file(origin: str | None) -> bool:
+        return origin is not None and _workspace_path(origin, root) in targets
+
+    return (ctx.taint.matches(path_part, trusted=task)
+            + ctx.taint.matches(rest, trusted=task, ignore_origin=same_file))
+
+
+def _query_matches(ctx: RuleContext) -> list[TaintMatch]:
+    """Untrusted data carried in the query or fragment of an outbound URL.
+
+    Applies to the egress args of every tool, sinks or not: a GET with data in
+    the query string sends that data out, even to an allowlisted host. A URL
+    copied whole from untrusted content (following a link) is exempt.
+    """
+    found: list[TaintMatch] = []
+    for arg in ctx.tool.egress_args:
+        value = ctx.call.args.get(arg)
+        if not isinstance(value, str):
+            continue
+        for m in URL_RE.finditer(value):
+            url = m.group(0).rstrip(".,;:!?'\"")
+            if ctx.taint.is_url_token(url):
+                continue
+            try:
+                parts = urlsplit(url)
+            except ValueError:
+                continue
+            carried = unquote_plus(f"{parts.query} {parts.fragment}").strip()
+            if carried:
+                found += [t for t in ctx.taint.matches({arg: carried}, trusted=ctx.call.task)
+                          if t.kind != "url"]
+    return found
+
+
 def r1_tainted_sink(ctx: RuleContext) -> list[Finding]:
-    if not ctx.tool.sink:
+    matches: list[TaintMatch] = []
+    if ctx.tool.sink:
+        matches = _sink_matches(ctx)
+    query = _query_matches(ctx)
+    if not matches and not query:
         return []
-    matches = ctx.taint.matches(ctx.call.args, trusted=ctx.call.task)
-    if not matches:
-        return []
-    hit = {top_level(m.arg) for m in matches}
+    hit = {top_level(m.arg) for m in matches + query}
     args = tuple(a for a in ctx.call.args if a in hit)
-    kinds = sorted({m.kind for m in matches})
-    sources = sorted({m.source for m in matches})
+    kinds = sorted({m.kind for m in matches + query})
+    sources = sorted({m.source for m in matches + query})
     plural = "s" if len(args) > 1 else ""
+    where = "came from untrusted content" if matches else "carry untrusted content in a URL query"
+    if not matches and len(args) == 1:
+        where = "carries untrusted content in a URL query"
     return [Finding(
         "R1", Verdict.BLOCK,
-        f"arg{plural} {_quote_args(args)} came from untrusted content "
-        f"({', '.join(kinds)} from {', '.join(sources)})",
+        f"arg{plural} {_quote_args(args)} {where} ({', '.join(kinds)} from {', '.join(sources)})",
         args,
     )]
 
@@ -117,7 +179,17 @@ def r2_unnamed_destination(ctx: RuleContext) -> list[Finding]:
 # R3: irreversible
 
 
+GIT_IRREVERSIBLE = re.compile(
+    r"\bgit\s+push\b[^;&|\n]*?\s(?:--delete\b|-d\b|--force(?:-with-lease)?\b|-f\b|--mirror\b|\+\S+|:\S+)")
+
+
 def r3_irreversible(ctx: RuleContext) -> list[Finding]:
+    for arg in ctx.tool.shell_args:
+        cmd = ctx.call.args.get(arg)
+        if isinstance(cmd, str) and (m := GIT_IRREVERSIBLE.search(cmd)):
+            return [Finding("R3", Verdict.ESCALATE,
+                            f"shell command rewrites or deletes remote history ({m.group(0).strip()}) "
+                            "and needs approval", (arg,))]
     if not ctx.tool.is_irreversible(ctx.call.args):
         return []
     which = [f"{a}={ctx.call.args.get(a)!r}" for a, vals in ctx.tool.irreversible_when.items()
@@ -166,6 +238,11 @@ HISTORY_WIPE = [
     re.compile(r"\bset\s+\+o\s+history\b"),
     re.compile(r"(?:\brm\b|\bshred\b|>)[^;&|]*\.(?:bash|zsh|sh)_history\b"),
 ]
+INTERPRETER_CODE = re.compile(r"\b(?:python[0-9.]*|perl|ruby|node)\b[^|;&]*?\s-[ce]\s+(?P<code>.+)", re.DOTALL)
+INTERPRETER_DELETE = re.compile(
+    r"rmtree|os\.(?:remove|unlink|rmdir|removedirs)|\.unlink\(|\.rmdir\(|\bunlink\b|rm_rf|FileUtils\.rm"
+    r"|rmSync|rmdirSync|unlinkSync")
+PATH_LITERAL = re.compile(r"""['"]((?:~|\.\.|/)[^'"]*)['"]""")
 _SEGMENT_SPLIT = {";", "&&", "||", "|", "&", "\n", "(", ")"}
 _PREFIXES = {"sudo", "env", "command", "nohup", "time", "nice", "xargs", "exec"}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -229,6 +306,11 @@ def shell_findings(command: str, root: str) -> list[str]:
             bad = [t for t in targets if _outside_workspace(t, root)]
             if recursive and bad:
                 reasons.append(f"recursive rm outside the workspace: {' '.join(bad)}")
+    code = INTERPRETER_CODE.search(command)
+    if code and INTERPRETER_DELETE.search(code.group("code")):
+        bad = [p for p in PATH_LITERAL.findall(code.group("code")) if _outside_workspace(p, root)]
+        if bad:
+            reasons.append(f"interpreter deletes outside the workspace: {' '.join(bad)}")
     if any(p.search(command) for p in PIPE_TO_SHELL):
         reasons.append("pipes downloaded or piped content into a shell/interpreter")
     if CREDENTIAL_PATHS.search(command):

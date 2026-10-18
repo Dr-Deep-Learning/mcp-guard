@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from .models import ToolResult
 
@@ -87,12 +87,15 @@ class TaintMatch:
     kind: str      # url | email | path | substring
     snippet: str   # the matched token or run (normalised)
     source: str    # where the untrusted text came from, e.g. "web.fetch_url#1"
+    origin: str | None = None  # file path the text was read from, if any
 
 
 @dataclass
 class _Source:
     label: str
     shingles: set[str]
+    origin: str | None = None
+    text: str = ""  # normalised
 
 
 @dataclass
@@ -100,7 +103,7 @@ class TaintTracker:
     """Per-session record of untrusted text."""
 
     min_len: int = 20
-    tokens: dict[str, tuple[str, str]] = field(default_factory=dict)  # norm token -> (kind, source)
+    tokens: dict[str, tuple[str, str, str | None]] = field(default_factory=dict)  # token -> (kind, source, origin)
     sources: list[_Source] = field(default_factory=list)
 
     @property
@@ -111,19 +114,37 @@ class TaintTracker:
         n = self.min_len
         return {norm[i:i + n] for i in range(len(norm) - n + 1)}
 
-    def add(self, text: str, source: str) -> None:
-        """Record a piece of untrusted text (first occurrence wins the label)."""
+    def add(self, text: str, source: str, origin: str | None = None) -> None:
+        """Record a piece of untrusted text (first occurrence wins the label).
+
+        ``origin`` is the file path the text was read from, when there is one;
+        rule R1 uses it to recognise an edit written back to the same file.
+        """
         for kind, token in extract_tokens(text):
-            self.tokens.setdefault(normalize(token), (kind, source))
-        self.sources.append(_Source(source, self._shingles(normalize(text))))
+            self.tokens.setdefault(normalize(token), (kind, source, origin))
+        norm = normalize(text)
+        self.sources.append(_Source(source, self._shingles(norm), origin, norm))
 
     def record(self, result: ToolResult, step: int | None = None) -> None:
         label = result.call.qualified_name + (f"#{step}" if step is not None else "")
-        self.add(result.output, label)
+        path = result.call.args.get("path")
+        self.add(result.output, label, path if isinstance(path, str) else None)
 
-    def matches(self, args: Mapping[str, Any], trusted: str = "") -> list[TaintMatch]:
-        """All taint matches in ``args``, ignoring anything named in ``trusted``."""
-        if not self.sources:
+    def is_url_token(self, value: str) -> bool:
+        """True if ``value`` is a URL that appeared as-is in untrusted content
+        (the agent is following a link, not building one)."""
+        entry = self.tokens.get(normalize(value))
+        return entry is not None and entry[0] == "url"
+
+    def matches(self, args: Mapping[str, Any], trusted: str = "",
+                ignore_origin: Callable[[str | None], bool] | None = None) -> list[TaintMatch]:
+        """All taint matches in ``args``, ignoring anything named in ``trusted``.
+
+        ``ignore_origin`` drops whole sources (by origin) from consideration,
+        e.g. the file an edit is being written back to.
+        """
+        sources = [s for s in self.sources if not (ignore_origin and ignore_origin(s.origin))]
+        if not sources:
             return []
         trusted_norm = normalize(trusted)
         trusted_shingles = self._shingles(trusted_norm)
@@ -131,9 +152,12 @@ class TaintTracker:
         for arg_path, value in iter_strings(args):
             norm = normalize(value)
             hit = False
-            for token, (kind, source) in self.tokens.items():
+            for token, (kind, source, origin) in self.tokens.items():
                 if token in norm and token not in trusted_norm:
-                    out.append(TaintMatch(arg_path, kind, token, source))
+                    src = next((s for s in sources if token in s.text), None)
+                    if src is None:
+                        continue
+                    out.append(TaintMatch(arg_path, kind, token, src.label, src.origin))
                     hit = True
             if hit:
                 continue
@@ -141,9 +165,9 @@ class TaintTracker:
                 run = norm[i:i + self.min_len]
                 if run in trusted_shingles:
                     continue
-                src = next((s.label for s in self.sources if run in s.shingles), None)
+                src = next((s for s in sources if run in s.shingles), None)
                 if src is not None:
-                    out.append(TaintMatch(arg_path, "substring", run, src))
+                    out.append(TaintMatch(arg_path, "substring", run, src.label, src.origin))
                     break
         return out
 
