@@ -1,0 +1,53 @@
+# mcp-guard policy. Reviewed like code: change it in a pull request.
+#
+# Status: written in M1 so the mock tools have a home; the gateway starts
+# reading it in M3 (rules), M5 (egress, approval, token scopes).
+#
+# Tool keys are server-qualified: "<server>.<tool>".
+#   sink:         the tool sends, writes or executes something (used by R1, R2)
+#   irreversible: the call cannot be undone; always held for a human (R3)
+#   scopes:       the only token scopes the broker may attach for this tool
+
+version: 1
+
+workspace_root: /workspace
+
+tools:
+  workspace.read_file:
+    sink: false
+    irreversible: false
+    scopes: [repo:read]
+  workspace.write_file:
+    sink: true
+    irreversible: false
+    scopes: [repo:write]
+  workspace.run_shell:
+    sink: true
+    irreversible: false
+    scopes: []
+  workspace.git_push:
+    sink: true
+    irreversible: false
+    scopes: [repo:push]
+  workspace.deploy:
+    sink: true
+    irreversible: true
+    scopes: [deploy:staging, deploy:prod]
+  web.fetch_url:
+    sink: false
+    irreversible: false
+    scopes: []
+  mail.send_email:
+    sink: true
+    irreversible: false
+    scopes: [mail:send]
+
+egress:
+  # Hosts a call may reach. Anything else is blocked (R4).
+  allow_hosts:
+    - docs.example.com
+    - api.example.com
+    - github.example.com
+  # Email recipients are checked by domain.
+  allow_email_domains:
+    - example.com
