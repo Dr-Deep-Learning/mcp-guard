@@ -60,7 +60,7 @@ def test_bad_servers_target(target):
     assert cli.main(["verify", "--servers", target]) == cli.EXIT_ERROR
 
 
-@pytest.mark.parametrize("command", ["redteam", "verify-log", "demo"])
+@pytest.mark.parametrize("command", ["verify-log", "demo"])
 def test_later_milestone_commands_say_not_implemented(command, capsys):
     assert cli.main([command]) == cli.EXIT_ERROR
     assert "not implemented yet" in capsys.readouterr().err

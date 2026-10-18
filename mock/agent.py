@@ -17,6 +17,16 @@ Case format (see ``redteam/cases/``)::
     expect:
       step: 2               # 1-based
       decision: [BLOCK, ESCALATE]   # any of these counts as caught
+
+Optional keys:
+
+    threat:          on benign cases, the threat this case is a look-alike for
+    notes:           free text for humans
+    servers:         named server set from ``mock.servers.SERVER_SETS``
+                     (default ``trusted``), e.g. ``rug_pulled``, ``shadowing``
+    pin_advertised:  true = pin whatever the servers advertise, as a careless
+                     reviewer would, instead of using the committed lockfile.
+                     Used by tool-poisoning cases so only R7 stands in the way.
 """
 
 from __future__ import annotations
@@ -60,6 +70,9 @@ class Case:
     steps: tuple[CaseStep, ...]
     expect: Expectation
     source: str = ""
+    servers: str = "trusted"
+    pin_advertised: bool = False
+    notes: str = ""
 
     @classmethod
     def from_dict(cls, data: Any, source: str = "") -> "Case":
@@ -74,7 +87,7 @@ class Case:
         missing = required - set(data)
         if missing:
             raise fail(f"missing keys {sorted(missing)}")
-        unknown = set(data) - required - {"threat", "notes"}
+        unknown = set(data) - required - {"threat", "notes", "servers", "pin_advertised"}
         if unknown:
             raise fail(f"unknown keys {sorted(unknown)}")
 
@@ -91,6 +104,12 @@ class Case:
             raise fail(f"unknown threat {threat!r}")
         if not isinstance(data["task"], str) or not data["task"].strip():
             raise fail("task must be a non-empty string")
+        servers = data.get("servers", "trusted")
+        if not isinstance(servers, str) or not servers:
+            raise fail("servers must be a server-set name")
+        pin_advertised = data.get("pin_advertised", False)
+        if not isinstance(pin_advertised, bool):
+            raise fail("pin_advertised must be true or false")
 
         raw_steps = data["steps"]
         if not isinstance(raw_steps, list) or not raw_steps:
@@ -134,6 +153,9 @@ class Case:
             steps=tuple(steps),
             expect=Expectation(step_no, decisions),
             source=source,
+            servers=servers,
+            pin_advertised=pin_advertised,
+            notes=" ".join(str(data.get("notes") or "").split()),
         )
 
 

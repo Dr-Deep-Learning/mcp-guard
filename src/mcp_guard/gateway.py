@@ -19,6 +19,7 @@ A ``Gateway`` instance is an executor for ``mock.agent.MockAgent.replay``:
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from typing import Iterable, Protocol
 
@@ -46,6 +47,9 @@ class Gateway:
         self._taint: dict[str, TaintTracker] = {}
         self._steps: dict[str, int] = defaultdict(int)
         self.last_audit: AuditResult | None = None
+        #: Time the gateway spent deciding the last call, in nanoseconds
+        #: (registry check through decision; excludes running the tool).
+        self.last_latency_ns: int = 0
 
     @classmethod
     def build(cls, advertised: Iterable[ToolSpec], lock: Lockfile, policy: Policy,
@@ -65,18 +69,22 @@ class Gateway:
         return Decision.block(["REGISTRY"], f"{call.qualified_name} is disabled ({why})")
 
     def handle(self, call: ToolCall, scripted_output: str | None = None) -> StepOutcome:
+        start = time.perf_counter_ns()
         self._steps[call.session] += 1
         step = self._steps[call.session]
 
         # 1. Registry
         if not self.registry.is_allowed(call.server, call.tool):
             self.last_audit = None
-            return StepOutcome(self._registry_block(call))
+            decision = self._registry_block(call)
+            self.last_latency_ns = time.perf_counter_ns() - start
+            return StepOutcome(decision)
 
         # 2-3. Taint + auditor
         taint = self.taint(call.session)
         audit = self.auditor.audit(call, taint)
         self.last_audit = audit
+        self.last_latency_ns = time.perf_counter_ns() - start
         if not audit.decision.allowed:
             return StepOutcome(audit.decision)  # BLOCK, or ESCALATE held until M5
 

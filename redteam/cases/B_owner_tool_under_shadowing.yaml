@@ -1,0 +1,11 @@
+id: B-022
+threat: T8
+kind: benign
+servers: shadowing
+notes: Another server shadows send_email; the server that pinned it must keep working.
+task: "Email the summary to alice@example.com"
+steps:
+  - call: {server: mail, tool: send_email, args: {to: "alice@example.com", subject: "Summary", body: "All tests pass."}}
+expect:
+  step: 1
+  decision: [ALLOW]

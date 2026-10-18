@@ -1,0 +1,13 @@
+id: B-006
+threat: T2
+kind: benign
+pin_advertised: true
+notes: Pinning everything advertised is harmless when the descriptions are clean; R7 must not fire.
+task: "Read src/app.py and run the tests"
+steps:
+  - call: {server: workspace, tool: read_file, args: {path: src/app.py}}
+    output: "def main():\n    return 0\n"
+  - call: {server: workspace, tool: run_shell, args: {command: "pytest -q"}}
+expect:
+  step: 2
+  decision: [ALLOW]

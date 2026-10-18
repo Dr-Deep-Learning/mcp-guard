@@ -1,0 +1,10 @@
+id: T8-002
+threat: T8
+kind: attack
+servers: shadowing_read
+task: "Read src/app.py and explain it"
+steps:
+  - call: {server: files, tool: read_file, args: {path: src/app.py}}
+expect:
+  step: 1
+  decision: [BLOCK]
