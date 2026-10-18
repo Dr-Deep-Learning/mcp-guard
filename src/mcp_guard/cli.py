@@ -101,7 +101,7 @@ def _fraction(text: str) -> float:
 def cmd_redteam(args: argparse.Namespace) -> int:
     _cwd_on_path()
     from mock.agent import load_cases
-    from redteam.run import check_gate, score, write_reports
+    from redteam.run import check_gate, compare_reports, score, update_readme, write_reports
 
     from .policy import load_policy
 
@@ -121,7 +121,17 @@ def cmd_redteam(args: argparse.Namespace) -> int:
     if not args.no_write:
         json_path, md_path = write_reports(report, args.out)
         print(f"wrote {json_path} and {md_path}")
+    if args.update_readme:
+        changed = update_readme(args.update_readme, report)
+        print(f"{'updated' if changed else 'unchanged'}: results block in {args.update_readme}")
     failures = check_gate(report, args.min_catch, args.max_fp)
+    if args.expect_report:
+        import json
+
+        with open(args.expect_report, encoding="utf-8") as f:
+            committed = json.load(f)
+        diffs = compare_reports(report, committed)
+        failures += [f"{args.expect_report} is out of date: {d}" for d in diffs]
     for failure in failures:
         print(f"GATE FAILED: {failure}", file=sys.stderr)
     return EXIT_REFUSED if failures else EXIT_OK
@@ -226,6 +236,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-fp", type=_fraction, default=None,
                     help="fail (exit 1) if the false-positive rate is above this fraction")
     sp.add_argument("--no-write", action="store_true", help="print the summary only")
+    sp.add_argument("--expect-report", default=None, metavar="JSON",
+                    help="fail (exit 1) if any case outcome differs from this committed report")
+    sp.add_argument("--update-readme", default=None, metavar="README",
+                    help="rewrite the generated results block in this README")
     sp.set_defaults(func=cmd_redteam)
     sp = sub.add_parser("verify-log", help="check an audit log's hash chain")
     sp.add_argument("path", help="audit log (JSONL)")

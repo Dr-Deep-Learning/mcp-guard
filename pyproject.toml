@@ -18,6 +18,9 @@ classifiers = [
     "Topic :: Security",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Dr-Deep-Learning/mcp-guard"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 

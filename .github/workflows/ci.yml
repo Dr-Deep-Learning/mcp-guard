@@ -26,5 +26,27 @@ jobs:
         run: pytest
       - name: Lockfile matches the mock servers
         run: mcp-guard verify
-      # The red-team gate (`mcp-guard redteam --min-catch X --max-fp Y`) is
-      # added in M6, once X and Y come from a first full run.
+
+  redteam:
+    # The gate. Thresholds sit just inside the first full run (26/30 caught,
+    # 3/25 benign flagged; see DESIGN.md), so one new miss or one new false
+    # positive fails the build. Raise them when the numbers improve.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Red-team gate
+        run: >
+          mcp-guard redteam --out ci-results
+          --min-catch 0.85 --max-fp 0.15
+          --expect-report results/redteam_report.json
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redteam-report
+          path: ci-results/

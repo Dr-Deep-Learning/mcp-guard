@@ -236,3 +236,73 @@ def test_log_checks_are_in_the_report_but_not_in_call_stats():
     assert with_checks["summary"]["calls"] == without["summary"]["calls"] == 1
     assert with_checks["per_threat"]["T9"]["attacks"] == 5
     assert with_checks["summary"]["log_checks"] == 5
+
+
+# ---------------------------------------------------------------- committed report and README stay honest
+
+from redteam.run import (  # noqa: E402
+    README_END,
+    README_START,
+    compare_reports,
+    readme_block,
+    render_readme_block,
+    update_readme,
+)
+
+COMMITTED = ROOT / "results" / "redteam_report.json"
+README = ROOT / "README.md"
+
+
+def test_committed_report_matches_a_fresh_run():
+    committed = json.loads(COMMITTED.read_text(encoding="utf-8"))
+    assert compare_reports(score(load_cases(CASES), POLICY, LOCK), committed) == []
+
+
+def test_readme_results_block_matches_the_committed_report():
+    committed = json.loads(COMMITTED.read_text(encoding="utf-8"))
+    assert readme_block(README.read_text(encoding="utf-8")) == render_readme_block(committed)
+
+
+def test_compare_reports_lists_changes(mini_report):
+    other = json.loads(json.dumps(mini_report))
+    other["cases"][0]["result"] = "false_positive"
+    other["cases"].append({"id": "X-1", "result": "caught"})
+    diffs = compare_reports(mini_report, other)
+    assert any("B-901" in d and "false_positive" in d for d in diffs)
+    assert any("X-1" in d and "not in this run" in d for d in diffs)
+
+
+def test_readme_block_lists_misses_and_false_positives(mini_report):
+    block = render_readme_block(mini_report)
+    assert block.startswith(README_START) and block.endswith(README_END)
+    assert "| Attacks caught (BLOCK or ESCALATE at the expected step) | 1/2 (50.0%) |" in block
+    assert "`T6-901`" in block and "`B-902`" in block
+
+
+def test_update_readme(tmp_path, mini_report):
+    path = tmp_path / "README.md"
+    path.write_text(f"# x\n\n{README_START}\nold\n{README_END}\n\ntail\n", encoding="utf-8")
+    assert update_readme(path, mini_report) is True
+    text = path.read_text(encoding="utf-8")
+    assert "old" not in text and text.endswith("\n\ntail\n") and "1/2 (50.0%)" in text
+    assert update_readme(path, mini_report) is False
+    path.write_text("# no markers\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="results:start"):
+        update_readme(path, mini_report)
+
+
+def test_cli_expect_report(tmp_path, capsys, in_repo_root):
+    assert cli.main(["redteam", "--no-write", "--expect-report", str(COMMITTED)]) == cli.EXIT_OK
+    stale = json.loads(COMMITTED.read_text(encoding="utf-8"))
+    stale["cases"][0]["result"] = "missed"
+    path = tmp_path / "stale.json"
+    path.write_text(json.dumps(stale), encoding="utf-8")
+    assert cli.main(["redteam", "--no-write", "--expect-report", str(path)]) == cli.EXIT_REFUSED
+    assert "out of date" in capsys.readouterr().err
+
+
+def test_cli_update_readme(tmp_path, in_repo_root):
+    copy = tmp_path / "README.md"
+    copy.write_text(f"{README_START}\n{README_END}\n", encoding="utf-8")
+    assert cli.main(["redteam", "--out", str(tmp_path / "r"), "--update-readme", str(copy)]) == cli.EXIT_OK
+    assert "Attacks caught" in copy.read_text(encoding="utf-8")

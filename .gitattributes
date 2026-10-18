@@ -1,0 +1,4 @@
+# Same bytes on every platform: hashes, lockfiles and reports must not
+# change because a Windows checkout converted line endings.
+* text=auto eol=lf
+*.bat text eol=crlf
