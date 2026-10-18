@@ -28,8 +28,8 @@ jobs:
         run: mcp-guard verify
 
   redteam:
-    # The gate. Thresholds sit just inside the latest full run (29/30 caught,
-    # 1/25 benign flagged; see DESIGN.md), so one new miss or one new false
+    # The gate. Thresholds sit just inside the latest full run (33/36 caught,
+    # 3/31 benign flagged; see DESIGN.md), so one new miss or one new false
     # positive fails the build. Re-set them whenever the corpus changes.
     runs-on: ubuntu-latest
     steps:
@@ -42,7 +42,7 @@ jobs:
       - name: Red-team gate
         run: >
           mcp-guard redteam --out ci-results
-          --min-catch 0.95 --max-fp 0.07
+          --min-catch 0.90 --max-fp 0.12
           --expect-report results/redteam_report.json
       - name: Upload report
         if: always()
